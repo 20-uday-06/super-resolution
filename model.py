@@ -11,6 +11,7 @@ import torch.utils.model_zoo as model_zoo
 from collections import OrderedDict
 import os
 import torch.nn.functional as F
+import torch.nn.functional as F
 
 # VDSR and DMCN model
 
@@ -181,6 +182,10 @@ class DMCN_prelu(nn.Module):
 
 """ Parts of the U-Net model """
 
+class Mish(nn.Module):
+    def forward(self, x):
+        return x * torch.tanh(F.softplus(x))
+
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
@@ -191,17 +196,17 @@ class DoubleConv(nn.Module):
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            Mish(),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            Mish()
         )
 
     def forward(self, x):
         return self.double_conv(x)
 
 class DoubleConv_Down(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
+    """(convolution => [BN] => Mish) * 2"""
 
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super(DoubleConv_Down, self).__init__()
@@ -210,7 +215,7 @@ class DoubleConv_Down(nn.Module):
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            Mish(),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1),
         )
 
@@ -234,13 +239,12 @@ class Down(nn.Module):
             self.out_conv = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
                 nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True)
+                Mish()
             )
 
     def forward(self, x):
         if self.res_down:
             return self.out_conv(self.mid_conv((self.in_conv(x))) + self.in_conv(x))
-
         else:
             return self.maxpool_conv(x)
 
@@ -266,10 +270,7 @@ class Up(nn.Module):
         diffX = x2.size()[3] - x1.size()[3]
 
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2],mode='reflect')
-        # if you have padding issues, see
-        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
-        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+                        diffY // 2, diffY - diffY // 2], mode='reflect')
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
@@ -277,9 +278,6 @@ class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(OutConv, self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        # self.conv = nn.Sequential(
-        #     nn.Conv2d(in_channels, out_channels, kernel_size=1),
-        #     nn.Sigmoid())
 
     def forward(self, x):
         return self.conv(x)
@@ -288,25 +286,12 @@ class ResnetBlock(nn.Module):
     """Define a Resnet block"""
 
     def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
-        """Initialize the Resnet block
-        A resnet block is a conv block with skip connections
-        We construct a conv block with build_conv_block function,
-        and implement skip connections in <forward> function.
-        Original Resnet paper: https://arxiv.org/pdf/1512.03385.pdf
-        """
+        """Initialize the Resnet block"""
         super(ResnetBlock, self).__init__()
         self.conv_block = self.build_conv_block(dim, padding_type, norm_layer, use_dropout, use_bias)
 
     def build_conv_block(self, dim, padding_type, norm_layer, use_dropout, use_bias):
-        """Construct a convolutional block.
-        Parameters:
-            dim (int)           -- the number of channels in the conv layer.
-            padding_type (str)  -- the name of padding layer: reflect | replicate | zero
-            norm_layer          -- normalization layer
-            use_dropout (bool)  -- if use dropout layers.
-            use_bias (bool)     -- if the conv layer uses bias or not
-        Returns a conv block (with a conv layer, a normalization layer, and a non-linearity layer (ReLU))
-        """
+        """Construct a convolutional block."""
         conv_block = []
         p = 0
         if padding_type == 'reflect':
@@ -318,7 +303,7 @@ class ResnetBlock(nn.Module):
         else:
             raise NotImplementedError('padding [%s] is not implemented' % padding_type)
 
-        conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias), norm_layer(dim), nn.ReLU(True)]
+        conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias), norm_layer(dim), Mish()]
         if use_dropout:
             conv_block += [nn.Dropout(0.5)]
 
@@ -360,7 +345,7 @@ class MRUNet(nn.Module):
         resblocks = []
         for i in range(n_resblocks):
             resblocks += [ResnetBlock(1024 // factor, padding_type, norm_layer, use_dropout, use_bias)]
-        self.resblocks = nn.Sequential(*resblocks)
+        self.resblocks = nn.Sequential(*resblocks) 
 
         ### Decoder
         self.up1 = Up(1024, 512 // factor, bilinear)

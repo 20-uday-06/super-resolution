@@ -7,6 +7,9 @@ import skimage.measure
 import cv2
 from skimage.metrics import peak_signal_noise_ratio
 from skimage.metrics import structural_similarity as ssim_sk
+import torch
+import torch.nn.functional as F
+from torchvision import models
 	
 def norm4_f2(a,axis):
 	# result = np.zeros((np.array(a.shape)/2).astype(int))
@@ -70,12 +73,12 @@ def read_tif(in_file):
 
 	# Open dataset Day as np.array()
 	band = dataset.GetRasterBand(1)
-	LST_K_day = band.ReadAsArray().astype(np.float)
+	LST_K_day = band.ReadAsArray().astype(np.float64)
 	bandtype = gdal.GetDataTypeName(band.DataType)
 
 	# open dataset Night as np.array()
 	band = dataset.GetRasterBand(2)
-	LST_K_night = band.ReadAsArray().astype(np.float)
+	LST_K_night = band.ReadAsArray().astype(np.float64)
 	bandtype = gdal.GetDataTypeName(band.DataType)
 	dataset = None
 
@@ -94,8 +97,10 @@ def save_tif(out_file, LST_K_day, LST_K_night, cols, rows, projection, geotransf
 	# Eliminate the clouds' pixel
 	num_px = LST_K_day.shape[0]*LST_K_day.shape[1]
 	# thres = 0.15 # Threshold: maximum number of sea/cloud pixels
-	thres = 0 # Threshold: maximum number of sea/cloud pixels
-	
+	thres = 0.2 # Threshold: maximum number of sea/cloud pixels
+    
+	print("🧪 Pixels = ", num_px, " | Day zeros:", len(LST_K_day[LST_K_day == 0.0]), " | Night zeros:", len(LST_K_night[LST_K_night == 0.0]))
+
 	if len(LST_K_day[LST_K_day==0.0]) > thres*num_px or len(LST_K_night[LST_K_night==0.0]) > thres*num_px:
 		return False
 
@@ -117,58 +122,43 @@ def save_tif(out_file, LST_K_day, LST_K_night, cols, rows, projection, geotransf
 	return True
 
 def read_modis(in_file):
-	"""
-	This function is for reading modis file in format "x.hdf" contained in 
-	in_file parameter.
-	INPUT: 
-	in_file: path to hdf file
-	to be completed if we need more stuffs
+	from osgeo import gdal
 
-	OUTPUT:
-	LST_K_day and LST_K_night: Day and Night LST image arrays
-	cols, rows: numbers of pixels alongs x,y axes of each raster
-	projection: projection information
-	geotransform: georeferencing information
-	# georef format = (x-coor top left pixel,resX,0,y-coor top left pixel,rexY,0)
-	to be completed if we need more information (georeference,bands,etc.)
-	"""
-	# open dataset Day
-	dataset = gdal.Open(in_file,gdal.GA_ReadOnly)
-	subdataset =	gdal.Open(dataset.GetSubDatasets()[0][0], gdal.GA_ReadOnly)
+	# Open the HDF file
+	dataset = gdal.Open(in_file, gdal.GA_ReadOnly)
+	subdatasets = dataset.GetSubDatasets()
 
-	cols =subdataset.RasterXSize
-	rows = subdataset.RasterYSize
-	projection = subdataset.GetProjection()
-	geotransform = subdataset.GetGeoTransform()
+	# Initialize
+	day_path = None
+	night_path = None
 
-	# Coordinates of top left pixel of the image (Lat, Lon)
-	# coords=np.asarray((geotransform[0],geotransform[3]))
+	# Find subdataset paths by name
+	for sds_name, sds_desc in subdatasets:
+		if "LST_Day_1km" in sds_desc:
+			day_path = sds_name
+		elif "LST_Night_1km" in sds_desc:
+			night_path = sds_name
 
-	# We read the Image as an array
-	band = subdataset.GetRasterBand(1)
-	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float)
-	# bandtype = gdal.GetDataTypeName(band.DataType)
+	# If either is missing, return None
+	if day_path is None or night_path is None:
+		print("Could not find LST_Day_1km or LST_Night_1km in", in_file)
+		return None, None, None, None, None, None
 
-	# To convert LST MODIS units to Kelvin
-	LST_K_day=0.02*LST_raw
+	# Read day data
+	day_ds = gdal.Open(day_path, gdal.GA_ReadOnly)
+	cols = day_ds.RasterXSize
+	rows = day_ds.RasterYSize
+	projection = day_ds.GetProjection()
+	geotransform = day_ds.GetGeoTransform()
 
-	dataset = None
-	subdataset = None
-	# open dataset Night
-	dataset = gdal.Open(in_file,gdal.GA_ReadOnly)
-	subdataset =	gdal.Open(dataset.GetSubDatasets()[4][0], gdal.GA_ReadOnly)
+	LST_day_raw = day_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+	LST_K_day = 0.02 * LST_day_raw
 
-	# We read the Image as an array
-	band = subdataset.GetRasterBand(1)
-	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float)
-	# bandtype = gdal.GetDataTypeName(band.DataType)
+	# Read night data
+	night_ds = gdal.Open(night_path, gdal.GA_ReadOnly)
+	LST_night_raw = night_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+	LST_K_night = 0.02 * LST_night_raw
 
-	# To convert LST MODIS units to Kelvin
-	LST_K_night=0.02*LST_raw
-	dataset = None
-	subdataset = None
-
-	# return LST_K_day, LST_K_night
 	return LST_K_day, LST_K_night, cols, rows, projection, geotransform
 
 
@@ -229,11 +219,13 @@ def crop_modis(hdf_path, hdf_name, save_dir, save_dir_downsample_2, save_dir_dow
 	# print("Number of cropped night images", win_count)
 	
 	# Save images and metadata into .tif file
+    
 	for i in range(len(img_cropped_names)):
 		save_path = os.path.join(save_dir,img_cropped_names[i])
 		succes = save_tif(save_path, img_days[i], img_nights[i], cols2, rows2, projection, geotransform2s[i])
 
 		if succes:
+
 			save_path_downsample_2 = os.path.join(save_dir_downsample_2,img_cropped_names[i])
 			save_path_downsample_4 = os.path.join(save_dir_downsample_4,img_cropped_names[i])
 
@@ -265,8 +257,8 @@ def crop_modis(hdf_path, hdf_name, save_dir, save_dir_downsample_2, save_dir_dow
 			# plt.title("2km")
 			# plt.show()
 		else:
-			# print("Not success!")
-			pass
+			print("Not success!")
+			# pass
 
 
 def save_tif_MOD13A2(out_file, red_downsample, NIR_downsample, MIR_downsample, cols, rows, projection, geotransform):
@@ -310,7 +302,7 @@ def read_modis_MOD13A2(in_file):
 
 	# We read the Image as an array
 	band = subdataset.GetRasterBand(1)
-	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float)
+	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float64)
 
 	# To convert LST MODIS units to Kelvin
 	red =0.02*LST_raw
@@ -321,7 +313,7 @@ def read_modis_MOD13A2(in_file):
 
 	# We read the Image as an array
 	band = subdataset.GetRasterBand(1)
-	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float)
+	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float64)
 	# bandtype = gdal.GetDataTypeName(band.DataType)
 	# To convert LST MODIS units to Kelvin
 	NIR =0.02*LST_raw
@@ -332,7 +324,7 @@ def read_modis_MOD13A2(in_file):
 
 	# We read the Image as an array
 	band = subdataset.GetRasterBand(1)
-	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float)
+	LST_raw = band.ReadAsArray(0, 0, cols, rows).astype(np.float64)
 	# bandtype = gdal.GetDataTypeName(band.DataType)
 	# To convert LST MODIS units to Kelvin
 	MIR =0.02*LST_raw
@@ -514,6 +506,34 @@ def get_loss(disp, img):
     mse_img = ((disp - img)**2).mean()
     return mse_img
 
+
+
+# # Load pre-trained VGG19 for perceptual loss
+# vgg = models.vgg19(pretrained=True).features[:16].eval().to(device)
+# for param in vgg.parameters():
+#     param.requires_grad = False  # Freeze VGG weights
+
+# def gradient_loss(img):
+#     """ Computes smoothness loss using image gradients """
+#     dx = torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])
+#     dy = torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:])
+#     return torch.mean(dx) + torch.mean(dy)
+
+# def perceptual_loss(gen, target):
+#     """ Computes perceptual loss using VGG features """
+#     gen_features = vgg(gen)
+#     target_features = vgg(target)
+#     return F.mse_loss(gen_features, target_features)
+
+# def get_loss(disp, img, alpha=1.0, beta=0.1, gamma=0.05):
+#     """ Combined loss function: MSE + Physics + Perceptual """
+#     mse_img = F.mse_loss(disp, img)  # Standard MSE loss
+#     physics_loss = gradient_loss(disp)  # Physics-based loss
+#     perceptual = perceptual_loss(disp, img)  # Perceptual loss
+
+#     total_loss = alpha * mse_img + beta * physics_loss + gamma * perceptual
+#     return total_loss
+
 def linear_fit_test(path_index, path_temperature, min_T, path_fit, plot, path_plot):
     from osgeo import gdal
     import numpy as np
@@ -629,7 +649,7 @@ def linear_unmixing_test(path_index, path_temperature, path_fit, iscale, path_ma
         rows_m = dataset_Mask.RasterYSize #Spatial dimension y
 
 # Read as array
-        mask= dataset_Mask.ReadAsArray(0, 0, cols_m, rows_m).astype(np.float)
+        mask= dataset_Mask.ReadAsArray(0, 0, cols_m, rows_m).astype(np.float64)
 
 ###################################################################
 ########### UNMIXING ##############################################

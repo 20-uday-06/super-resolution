@@ -1,0 +1,16 @@
+# Ignore data and outputs
+MODIS/
+output/
+__pycache__/
+*.pyc
+
+# Ignore virtual environments
+env/
+venv/
+modis_env/
+
+# Ignore results (optional if you don't want result images in repo)
+results/
+
+# Ignore VSCode settings (optional)
+.vscode/

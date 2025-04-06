@@ -21,11 +21,14 @@ args = parser.parse_args()
 
 
 def main():
+    os.makedirs(args.savepath, exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Load pretrained model
     model_MRUnet = MRUNet(res_down=True, n_resblocks=1, bilinear=0).to(device)
-    model_MRUnet.load_state_dict(torch.load(args.pretrained))
+    checkpoint = torch.load(args.pretrained, map_location='cpu')
+    model_MRUnet.load_state_dict(checkpoint['model_state_dict'])
+
     # Normalization factor and scale
     max_val = args.max_val
     scale = 4
@@ -82,5 +85,5 @@ if __name__ == '__main__':
 
 
 
-
+# python run_inference.py --datapath MODIS/MOD_2021_MOD11A1/tifs_files/1km --pretrained MRUNet_best.pth --savepath results --max_val 333.32
 
