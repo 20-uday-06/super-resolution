@@ -22,7 +22,7 @@ def MODIS_Parallel_Downloader(year,product, num_threads, user="projet3a", passwo
     # Download data with multi-core
     with pymp.Parallel(num_threads) as p:
     # if 1:
-        for month in p.range(1, 13):
+        for month in p.range(1, 2):
             startdate = "{}-{}-01".format(str(year),str(month).zfill(2))
             if month != 12: 
                 enddate = "{}-{}-01".format(str(year),str(month+1).zfill(2))
@@ -43,10 +43,10 @@ def MODIS_Parallel_Downloader(year,product, num_threads, user="projet3a", passwo
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument('--year_begin', type=int, default=2000)
-    parser.add_argument('--year_end', type=int, default=2021)
-    parser.add_argument('--username', type=str, default="ganglina")
-    parser.add_argument('--password', type=str, default="505166Tgl")
+    parser.add_argument('--year_begin', type=int, default=2021)
+    parser.add_argument('--year_end', type=int, default=2022)
+    parser.add_argument('--username', type=str, default="uday2006")
+    parser.add_argument('--password', type=str, default="Udaytyagi2006@")
     args = parser.parse_args()
 
     years = list(np.arange(args.year_begin, args.year_end))

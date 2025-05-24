@@ -501,38 +501,89 @@ def ssim_notorch(label, outputs):
 
 
 
-def get_loss(disp, img):
-    # THE FINAL LOSS FUNCTION
-    mse_img = ((disp - img)**2).mean()
-    return mse_img
+# def get_loss(disp, img):
+#     # THE FINAL LOSS FUNCTION
+#     mse_img = ((disp - img)**2).mean()
+#     return mse_img
 
 
 
-# # Load pre-trained VGG19 for perceptual loss
-# vgg = models.vgg19(pretrained=True).features[:16].eval().to(device)
-# for param in vgg.parameters():
-#     param.requires_grad = False  # Freeze VGG weights
+# Load pre-trained VGG19 for perceptual loss
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+vgg = models.vgg19(pretrained=True).features[:16].eval().to(device)
+for param in vgg.parameters():
+    param.requires_grad = False  # Freeze VGG weights
 
-# def gradient_loss(img):
-#     """ Computes smoothness loss using image gradients """
-#     dx = torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])
-#     dy = torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:])
-#     return torch.mean(dx) + torch.mean(dy)
+def stefan_boltzmann_loss(disp, img, emissivity=0.95):
+    """
+    Loss based on the Stefan–Boltzmann Law.
+    Enforces radiative consistency from predicted temperature values.
+    Assumes input temperatures are in Kelvin.
+    """
+    sigma = 5.670374419e-8  # Stefan–Boltzmann constant in W/m²K⁴
 
-# def perceptual_loss(gen, target):
-#     """ Computes perceptual loss using VGG features """
-#     gen_features = vgg(gen)
-#     target_features = vgg(target)
-#     return F.mse_loss(gen_features, target_features)
+    # Compute emitted energy
+    E_pred = emissivity * sigma * (disp ** 4)
+    E_true = emissivity * sigma * (img ** 4)
 
-# def get_loss(disp, img, alpha=1.0, beta=0.1, gamma=0.05):
-#     """ Combined loss function: MSE + Physics + Perceptual """
-#     mse_img = F.mse_loss(disp, img)  # Standard MSE loss
-#     physics_loss = gradient_loss(disp)  # Physics-based loss
-#     perceptual = perceptual_loss(disp, img)  # Perceptual loss
+    return F.mse_loss(E_pred, E_true)
 
-#     total_loss = alpha * mse_img + beta * physics_loss + gamma * perceptual
-#     return total_loss
+
+def variance_based_loss(disp, img, lambda_var=0.1):
+    """
+    Adds variance of the error to the MSE loss to penalize inconsistent predictions.
+    """
+    error = disp - img
+    mse = F.mse_loss(disp, img)
+    variance = torch.var(error)
+    return mse + lambda_var * variance
+
+
+def temperature_conservation_loss(disp, img):
+    """
+    Ensures total temperature is conserved between super-resolved and original image.
+    """
+    mean_disp = torch.mean(disp)
+    mean_img = torch.mean(img)
+    return torch.abs(mean_disp - mean_img)
+
+
+def gradient_loss(img):
+    """ Computes smoothness loss using image gradients """
+    dx = torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])
+    dy = torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:])
+    return torch.mean(dx) + torch.mean(dy)
+
+def perceptual_loss(gen, target):
+    """ Computes perceptual loss using VGG features """
+    if gen.shape[1] == 1:
+        gen = gen.repeat(1, 3, 1, 1)      # Convert [B, 1, H, W] -> [B, 3, H, W]
+        target = target.repeat(1, 3, 1, 1)
+
+    gen_features = vgg(gen)
+    target_features = vgg(target)
+    return F.mse_loss(gen_features, target_features)
+
+
+def get_loss(disp, img, alpha=0.4, beta=0.3, gamma=0.1, delta=0.1, epsilon=0.1, zeta=0.1):
+    mse_img = F.mse_loss(disp, img)
+    gradient = gradient_loss(disp)
+    perceptual = perceptual_loss(disp, img)
+    conservation = temperature_conservation_loss(disp, img)
+    variance = variance_based_loss(disp, img)
+    sb_loss = stefan_boltzmann_loss(disp, img)
+
+    total_loss = (
+        alpha * mse_img +
+        beta * gradient +
+        gamma * perceptual +
+        delta * conservation +
+        epsilon * variance +
+        zeta * sb_loss
+    )
+    return total_loss
+
+
 
 def linear_fit_test(path_index, path_temperature, min_T, path_fit, plot, path_plot):
     from osgeo import gdal
