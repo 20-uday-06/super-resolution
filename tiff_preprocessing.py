@@ -1,73 +1,99 @@
-import os
+# Resample ASTER GeoTIFFs to 250 m and 1 km for super‑res work
+# -----------------------------------------------------------
+import os, time, glob
 import numpy as np
-import time
-import rasterio  # Library for handling TIFF images
+import rasterio
 from rasterio.enums import Resampling
-from utils import *
+from rasterio.transform import Affine
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from argparse import ArgumentParser
 
-def process_tiff(tiff_path, output_dir):
-    """
-    Function to process a TIFF image: resample and save in different resolutions.
-    """
-    with rasterio.open(tiff_path) as src:
-        # Define the scales you want to generate
-        scales = {
-            "1km": 1,   # original resolution
-            "2km": 2,   # half-size
-            "4km": 4    # quarter-size
-        }
 
-        for res_label, scale in scales.items():
-            new_height = src.height // scale
-            new_width  = src.width  // scale
+# ── core resample helper ────────────────────────────────────
+def resample_and_save(src_path, out_dir, native_res, targets):
+    """
+    Parameters
+    ----------
+    src_path   : str – path to one ASTER GeoTIFF
+    out_dir    : folder where resampled files go
+    native_res : 15 or 30  (metres/pixel of the input)
+    targets    : dict(label -> metreResolution)  e.g. {"250m":250, "1km":1000}
+    """
+    fname = os.path.basename(src_path)
+    with rasterio.open(src_path) as src:
+        band    = src.read(1)            # single‑band; change if multi‑band
+        prof_in = src.profile
 
-            # Skip if we’d end up with a zero-sized image
-            if new_height < 1 or new_width < 1:
-                print(f"  → Skipping {res_label}, output size would be {new_width}×{new_height}")
+        for lab, tgt_res in targets.items():
+            scale       = native_res / tgt_res
+            new_h       = int(src.height / scale)
+            new_w       = int(src.width  / scale)
+            if new_h < 1 or new_w < 1:
+                print(f"skip {lab} for {fname}: too small")
                 continue
 
-            # Read & resample
-            resampled = src.read(
-                out_shape=(1, new_height, new_width),
+            # resample
+            data = src.read(
+                out_shape=(1, new_h, new_w),
                 resampling=Resampling.bilinear
             )
 
-            # Write out the new TIFF
-            output_path = os.path.join(output_dir, f"{res_label}_{os.path.basename(tiff_path)}")
-            with rasterio.open(
-                output_path, 'w',
-                driver='GTiff',
-                height=new_height,
-                width=new_width,
-                count=1,
-                dtype=resampled.dtype,
-                crs=src.crs,
-                transform=src.transform
-            ) as dst:
-                dst.write(resampled)
+            # corrected GeoTransform
+            transform = (
+                src.transform *
+                Affine.scale(src.width / new_w, src.height / new_h)
+            )
 
-            print(f"  ✔ Saved {res_label} TIFF: {output_path}")
+            prof_out = prof_in.copy()
+            prof_out.update({
+                "height": new_h,
+                "width" : new_w,
+                "transform": transform
+            })
 
-def MODIS_Data_Preprocessing(year, product, num_threads, tiff_path):
-    # Force everything into a local "output/" folder
-    output_dir = os.path.abspath("output")
-    os.makedirs(output_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{lab}_{fname}")
+            with rasterio.open(out_path, 'w', **prof_out) as dst:
+                dst.write(data)
+            print(f"✓ {lab:<4} ➜ {out_path}")
 
-    print(f"Processing TIFF file: {tiff_path}")
-    process_tiff(tiff_path, output_dir)
+
+
+# ── main wrapper ────────────────────────────────────────────
+def batch_resample(in_path, out_root, native_res, threads):
+    if os.path.isfile(in_path):
+        tiffs = [in_path]
+    else:
+        tiffs = glob.glob(os.path.join(in_path, "*.tif"))
+
+    if not tiffs:
+        raise RuntimeError("No .tif files found.")
+
+    os.makedirs(out_root, exist_ok=True)
+    targets = {"250m": 250, "1km": 1000}
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=threads) as exe:
+        futs = [
+            exe.submit(resample_and_save, tif, out_root, native_res, targets)
+            for tif in tiffs
+        ]
+        for _ in as_completed(futs):
+            pass
+    print(f"\nDone: processed {len(tiffs)} file(s) in {(time.time()-t0)/60:.1f} min.")
+
+
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument('--year',        type=int,   default=2024)
-    parser.add_argument('--product',     type=str,   default="MOD11A2.061")
-    parser.add_argument('--tiff_path',   type=str,   required=True)
-    parser.add_argument('--num_threads', type=int,   default=4)
-    args = parser.parse_args()
+    p = ArgumentParser(
+        description="Resample ASTER GeoTIFF(s) to 250 m and 1 km versions")
+    p.add_argument("--input",  required=True,
+                   help="GeoTIFF file OR folder of .tif files")
+    p.add_argument("--outdir", default="output",
+                   help="folder where resampled TIFFs are written")
+    p.add_argument("--native_res", type=int, choices=[15,30], default=15,
+                   help="native resolution of the ASTER product (m)")
+    p.add_argument("--threads", type=int, default=4,
+                   help="parallel threads")
+    args = p.parse_args()
 
-    MODIS_Data_Preprocessing(
-        args.year,
-        args.product,
-        args.num_threads,
-        args.tiff_path
-    )
+    batch_resample(args.input, args.outdir, args.native_res, args.threads)

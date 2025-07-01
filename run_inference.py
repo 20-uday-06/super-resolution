@@ -1,85 +1,84 @@
-import torch
-import cv2
+# Run MRUNet super‑resolution on ASTER 1 km GeoTIFFs
+# ----------------------------------------------------------
+import os, argparse
 import numpy as np
-import argparse
-import os
+import cv2
 import matplotlib.pyplot as plt
+import torch
 
 from model import MRUNet
-from tiff_process import tiff_process
-from utils import downsampling
+from tiff_process_aster import tiff_process           # ← NEW helper
+from utils import upsampling, normalization           # reuse your utils
 
-parser = argparse.ArgumentParser(description='PyTorch MR UNet inference on a folder of tif files.',
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+# ── CLI args ────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser(
+    description='MRUNet inference on ASTER 1 km TIFFs',
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter
+)
 parser.add_argument('--datapath',
-                    help='path to the folder containing the tif files for inference')
-parser.add_argument('--pretrained', help='path to pre-trained model')
-parser.add_argument('--savepath', help='path to save figure')
-parser.add_argument('--max_val', default=333.32000732421875, type=float, 
-                    help='normalization factor for the input and output, which is the maximum pixel value of training data')
+                    default='ASTER/ASTER_2021_AST_07XT',
+                    help='folder with ASTER GeoTIFFs')
+parser.add_argument('--pretrained',
+                    default='MRUNet_ASTER_1k_250m.pt',
+                    help='checkpoint (.pt) from training script')
+parser.add_argument('--savepath',
+                    default='results_aster',
+                    help='folder where PNG figures are saved')
+parser.add_argument('--max_val',
+                    default=333.32, type=float,
+                    help='normalization factor (max pixel value of training set)')
+parser.add_argument('--band',        default=2,  type=int, help='ASTER band')
+parser.add_argument('--native_res',  default=15, type=int, choices=[15,30],
+                    help='native ASTER resolution (m)')
 args = parser.parse_args()
 
+# ── Main ───────────────────────────────────────────────────────────────────
 def main():
     os.makedirs(args.savepath, exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # Load pretrained model
-    model_MRUnet = MRUNet(res_down=True, n_resblocks=1, bilinear=0).to(device)
-    checkpoint = torch.load(args.pretrained, map_location='cpu')
-    model_MRUnet.load_state_dict(checkpoint['model_state_dict'])
+    # 1) Load model
+    model = MRUNet(res_down=True, n_resblocks=1, bilinear=0).to(device)
+    ckpt  = torch.load(args.pretrained, map_location=device)
+    model.load_state_dict(ckpt['model_state_dict'])
+    model.eval()
+
+    # 2) Build LR/HR stacks from ASTER files
+    print("► Building LR/HR arrays …")
+    LR_stack, HR_stack = tiff_process(
+        args.datapath,
+        band=args.band,
+        native_res=args.native_res
+    )
 
     max_val = args.max_val
-    scale = 4
+    scale   = 4                 # 1 km ➜ 250 m
 
-    # Tiff process
-    Y_day, Y_night = tiff_process(args.datapath)
+    # 3) Inference loop
+    for idx, (lr, hr_gt) in enumerate(zip(LR_stack, HR_stack)):
+        # Bicubic upsampling (baseline)
+        bicubic = cv2.resize(lr, (hr_gt.shape[1], hr_gt.shape[0]), cv2.INTER_CUBIC)
 
-    # Inference
-    indx = 0
-    for y_day, y_night in zip(Y_day, Y_night):
-        y_day_4km = downsampling(y_day, scale)
-        y_night_4km = downsampling(y_night, scale)
+        # Model input (normalize + channel/batch dims)
+        inp = normalization(bicubic, max_val)
+        inp = torch.tensor(inp[None, None, :, :], dtype=torch.float32, device=device)
 
-        bicubic_day = cv2.resize(y_day_4km, y_day.shape, cv2.INTER_CUBIC)
-        bicubic_night = cv2.resize(y_night_4km, y_night.shape, cv2.INTER_CUBIC)
+        with torch.no_grad():
+            sr = model(inp).cpu().numpy()[0, 0] * max_val
 
-        input_day = torch.tensor(np.reshape(bicubic_day / max_val, (1, 1, 64, 64)), dtype=torch.float).to(device)
-        input_night = torch.tensor(np.reshape(bicubic_night / max_val, (1, 1, 64, 64)), dtype=torch.float).to(device)
+        # 4) Save comparison figure
+        fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+        cmap = 'jet'; fs = 14
 
-        out_day = model_MRUnet(input_day).cpu().detach().numpy() * max_val
-        out_night = model_MRUnet(input_night).cpu().detach().numpy() * max_val
+        ax[0].imshow(hr_gt,   cmap=cmap); ax[0].set_title("GT 250 m", fontsize=fs); ax[0].axis('off')
+        ax[1].imshow(bicubic, cmap=cmap); ax[1].set_title("Bicubic",  fontsize=fs); ax[1].axis('off')
+        ax[2].imshow(sr,      cmap=cmap); ax[2].set_title("SR 250 m", fontsize=fs); ax[2].axis('off')
 
-        # Plot and save figure
-        fontsize = 15
-        clmap = 'jet'
-        fig, ax = plt.subplots(nrows=2, ncols=2, figsize=(12, 10))
-
-        ax[0, 0].imshow(y_day, vmin=y_day.min(), vmax=y_day.max(), cmap=clmap)
-        ax[0, 0].set_title("Ground truth day", fontsize=fontsize)
-        ax[0, 0].axis('off')
-
-        ax[0, 1].imshow(out_day[0, 0, :, :], vmin=y_day.min(), vmax=y_day.max(), cmap=clmap)
-        ax[0, 1].set_title("SR day", fontsize=fontsize)
-        ax[0, 1].axis('off')
-
-        ax[1, 0].imshow(y_night, vmin=y_night.min(), vmax=y_night.max(), cmap=clmap)
-        ax[1, 0].set_title("Ground truth night", fontsize=fontsize)
-        ax[1, 0].axis('off')
-
-        ax[1, 1].imshow(out_night[0, 0, :, :], vmin=y_night.min(), vmax=y_night.max(), cmap=clmap)
-        ax[1, 1].set_title("SR night", fontsize=fontsize)
-        ax[1, 1].axis('off')
-
-        # cmap = plt.get_cmap('jet',20)
-        # fig.tight_layout()
-        # fig.subplots_adjust(right=0.7)
-        # cbar_ax = fig.add_axes([0.65, 0.15, 0.03, 0.7])
-        # cbar_ax.tick_params(labelsize=15)
-        # fig.colorbar(im1, cax=cbar_ax, cmap = clmap)
-
-        plt.savefig(os.path.join(args.savepath, f"result_{indx}.png"), bbox_inches='tight')
-        plt.close(fig)  # ✅ Prevent too many open figures
-        indx += 1
+        plt.tight_layout()
+        out_png = os.path.join(args.savepath, f"sr_{idx:04d}.png")
+        plt.savefig(out_png, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"✓ Saved {out_png}")
 
 if __name__ == '__main__':
     main()
